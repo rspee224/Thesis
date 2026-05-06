@@ -1,8 +1,4 @@
 """
-Model Comparison Script
-=======================
-Compares multiple models across multiple data scenarios.
-
 Scenarios:
     1. No structural, no imputation  — only demographic/housing predictors
     2. No structural, with imputation — same + NaN target filled with 0
@@ -73,22 +69,53 @@ PLOTS     = Path("../4_Plots/comparison")
 
 TARGET = "vacancy_rate_pct"
 
-BASE_PREDICTORS = [
-    "total_population",
-    "share_working_age",
-    "share_owner_occupied",
-    "share_social_rental",
-    "share_private_rental",
-    "avg_property_value",
-    "population_growth_per1000",
-    "grey_pressure_pct",
-    "ses_score",
-]
+# Predictors are loaded dynamically from the file saved by pre_processing.py
+# This ensures model comparison always uses the same features as preprocessing
+PREDICTORS_FILE = PROCESSED / "predictors_list.txt"
 
-STRUCTURAL_PREDICTORS = [
+# These are the structural vacancy feature names — used to split scenarios
+STRUCTURAL_PREDICTOR_NAMES = [
     "structural_vacancy_count",
     "structural_vacancy_pct",
 ]
+
+def load_predictors(df: pd.DataFrame) -> tuple[list[str], list[str]]:
+    """
+    Load full predictor list from file saved by pre_processing.py.
+    Returns (base_predictors, structural_predictors) where:
+      - base_predictors = all predictors except structural vacancy features
+      - structural_predictors = structural vacancy features only
+    Falls back to hardcoded minimal list if file not found.
+    Filters to columns that exist in the dataframe.
+    """
+    if PREDICTORS_FILE.exists():
+        all_predictors = PREDICTORS_FILE.read_text().strip().splitlines()
+        log.info("Loaded %d predictors from %s", len(all_predictors), PREDICTORS_FILE)
+    else:
+        log.warning(
+            "predictors_list.txt not found — falling back to hardcoded list. "
+            "Run pre_processing.py first."
+        )
+        all_predictors = [
+            "total_population", "share_working_age", "share_owner_occupied",
+            "share_social_rental", "share_private_rental", "avg_property_value",
+            "population_growth_per1000", "grey_pressure_pct", "ses_score",
+            "structural_vacancy_count", "structural_vacancy_pct",
+        ]
+
+    # Filter to columns that exist in the dataframe
+    missing = [p for p in all_predictors if p not in df.columns]
+    if missing:
+        log.warning("  %d predictors not in dataset, skipping: %s", len(missing), missing)
+
+    available = [p for p in all_predictors if p in df.columns]
+
+    # Split into base and structural
+    structural = [p for p in available if p in STRUCTURAL_PREDICTOR_NAMES]
+    base       = [p for p in available if p not in STRUCTURAL_PREDICTOR_NAMES]
+
+    log.info("  Base predictors: %d  |  Structural predictors: %d", len(base), len(structural))
+    return base, structural
 
 TRAIN_YEARS      = [2015, 2016, 2017, 2018, 2019, 2020, 2021]
 TEST_YEARS       = [2022, 2023, 2024]
@@ -201,14 +228,20 @@ def evaluate(
 # Data preparation
 
 
-def load_data() -> pd.DataFrame:
+def load_data() -> tuple[pd.DataFrame, list[str], list[str]]:
     path = PROCESSED / "model_ready.csv"
     df   = pd.read_csv(path)
     log.info("Loaded model-ready data: %s  shape=%s", path, df.shape)
-    return df
+    base_predictors, structural_predictors = load_predictors(df)
+    return df, base_predictors, structural_predictors
 
 
-def prepare_scenario(df: pd.DataFrame, scenario: dict) -> tuple[pd.DataFrame, list[str]]:
+def prepare_scenario(
+    df: pd.DataFrame,
+    scenario: dict,
+    base_predictors: list[str],
+    structural_predictors: list[str],
+) -> tuple[pd.DataFrame, list[str]]:
     log.info("Preparing scenario: %s", scenario["name"])
     df = df.copy()
 
@@ -222,9 +255,9 @@ def prepare_scenario(df: pd.DataFrame, scenario: dict) -> tuple[pd.DataFrame, li
     else:
         log.info("  Keeping zero-vacancy rows: %d rows with vacancy = 0.", (df[TARGET] == 0).sum())
 
-    predictors = BASE_PREDICTORS.copy()
+    predictors = base_predictors.copy()
     if scenario["structural"]:
-        predictors = predictors + STRUCTURAL_PREDICTORS
+        predictors = predictors + structural_predictors
 
     before = len(df)
     df     = df.dropna(subset=predictors)
@@ -432,12 +465,14 @@ def main() -> None:
     sns.set_theme(style="whitegrid", palette="muted")
     plt.rcParams["figure.dpi"] = 130
 
-    df_base     = load_data()
+    df_base, base_predictors, structural_predictors = load_data()
     all_results = []
 
     for scenario in SCENARIOS:
         log.info("=== Scenario: %s ===", scenario["name"])
-        df_scenario, predictors = prepare_scenario(df_base.copy(), scenario)
+        df_scenario, predictors = prepare_scenario(
+            df_base.copy(), scenario, base_predictors, structural_predictors
+        )
         results = run_scenario(df_scenario, predictors, scenario)
         all_results.extend(results)
 

@@ -43,6 +43,8 @@ INTERIM   = Path("../2_Data_intermediate")
 PROCESSED = Path("../3_Data_processed")
 PLOTS     = Path("plots")
 
+COROP_KERNCIJFERS_FILE = "kerncijfers_corop.csv"
+
 # Column constants
 
 BEV_ABSOLUTE_COLS = [
@@ -76,12 +78,20 @@ KERN_ABSOLUTE_COLS = [
     "Overledenen_60",
     "Bevolkingsgroei_79",
     "Land_249",
+    # New municipality-level features
+    "Werkloosheid_159",          # unemployment (absolute count)
+    "Migratiesaldo_76",          # net migration (absolute count)
+    "BedrijfsvestigingenTotaal_168",  # total businesses (absolute count)
 ]
 KERN_RELATIVE_COLS = [
     "Koopwoningen_94",
     "HuurwoningenVanWoningcorporatie_95",
     "HuurwoningenVanOverigeVerhuurders_96",
     "GemiddeldeWOZWaardeVanWoningen_98",
+    # New municipality-level features
+    "Bevolkingsdichtheid_57",         # population density (relative)
+    "AfstandTotTreinstation_238",     # distance to train station (relative)
+    "GemiddeldeHuishoudensgrootte_89", # avg household size (relative)
 ]
 
 TARGET = "vacancy_rate_pct"
@@ -93,6 +103,7 @@ COLUMN_RENAME = {
     "GemeenteCode":                                            "municipality_code",
     "Gemeentenaam":                                            "municipality_name",
     "Stedelijkheid":                                           "urbanisation_level",
+    "urbanisation_level_enc":                                  "urbanisation_level_enc",
     "Gebruiksfunctie":                                         "property_type",
     "Onderzoekspopulatie":                                     "research_population",
     "Leegstand (aantal)":                                      "vacancy_count",
@@ -110,9 +121,45 @@ COLUMN_RENAME = {
     "SES_score":                                               "ses_score",
     "Leegstand, jaar eerder ook al leeg (aantal)":             "structural_vacancy_count",
     "structurele_leegstand_pct":                               "structural_vacancy_pct",
+    # New municipality-level features from kerncijfers
+    "Werkloosheid_159":                                        "unemployment",
+    "Migratiesaldo_76":                                        "net_migration",
+    "BedrijfsvestigingenTotaal_168":                           "total_businesses",
+    "Bevolkingsdichtheid_57":                                  "population_density",
+    "AfstandTotTreinstation_238":                              "dist_train_station",
+    "GemiddeldeHuishoudensgrootte_89":                         "avg_household_size",
+    # COROP-level features
+    "corop_unemployment":                                      "corop_unemployment",
+    "corop_population_density":                                "corop_population_density",
+    "corop_net_migration":                                     "corop_net_migration",
+    "corop_total_businesses":                                  "corop_total_businesses",
+    "corop_dist_train_station":                                "corop_dist_train_station",
+    "corop_avg_household_size":                                "corop_avg_household_size",
+    "corop_total_jobs":                                        "corop_total_jobs",
+}
+
+# Urbanisation level ordinal mapping (Niet stedelijk=1 ... Zeer sterk stedelijk=5)
+URBANISATION_ORDER = {
+    "Niet stedelijk":       1,
+    "Weinig stedelijk":     2,
+    "Matig stedelijk":      3,
+    "Sterk stedelijk":      4,
+    "Zeer sterk stedelijk": 5,
+}
+
+# COROP-level columns to extract from kerncijfers_corop.csv
+COROP_COLS = {
+    "Werkloosheid_159":            "corop_unemployment",
+    "Bevolkingsdichtheid_57":      "corop_population_density",
+    "Migratiesaldo_76":            "corop_net_migration",
+    "BedrijfsvestigingenTotaal_168": "corop_total_businesses",
+    "AfstandTotTreinstation_238":  "corop_dist_train_station",
+    "GemiddeldeHuishoudensgrootte_89": "corop_avg_household_size",
+    "TotaalBanen_116":             "corop_total_jobs",
 }
 
 PREDICTORS = [
+    # Municipality-level demographic and housing features
     "total_population",
     "share_working_age",
     "share_owner_occupied",
@@ -122,13 +169,34 @@ PREDICTORS = [
     "population_growth_per1000",
     "grey_pressure_pct",
     "ses_score",
+    # New municipality-level features
+    "unemployment",
+    "net_migration",
+    "total_businesses",
+    "population_density",
+    "dist_train_station",
+    "avg_household_size",
+    # Urbanisation level (ordinal 1-5)
+    "urbanisation_level_enc",
     # Structural vacancy features from Leegstandsmonitor
     "structural_vacancy_count",
     "structural_vacancy_pct",
+    "vacancy_rate_lag1",
+    # COROP-level regional economic features
+    "corop_unemployment",
+    "corop_population_density",
+    "corop_net_migration",
+    "corop_total_businesses",
+    "corop_dist_train_station",
+    "corop_avg_household_size",
+    "corop_total_jobs",
 ]
 
+# COROP dummy columns are added dynamically during preprocessing
+# and appended to PREDICTORS in prepare_modelling_dataset()
+
 # Minimum number of objects required for a vacancy rate to be meaningful
-MIN_ONDERZOEKSPOPULATIE = 5
+MIN_ONDERZOEKSPOPULATIE = 25
 
 SUM_COLS = [
     "Totale voorraad",
@@ -137,7 +205,7 @@ SUM_COLS = [
     "Leegstand, jaar eerder ook al leeg (aantal)",   # structural vacancy count
 ]
 
-GROUP_KEYS = ["Jaar", "Gemeentecode", "Gemeentenaam", "Stedelijkheid"]
+GROUP_KEYS = ["Jaar", "Gemeentecode", "Gemeentenaam", "Stedelijkheid", "COROPcode"]
 
 COMMERCIEEL_FUNCTIES = [
     "Kantoren", "Winkels", "Industrie", "Logies", "Bijeenkomsten",
@@ -573,6 +641,41 @@ def merge_ses_into_predictors(panel: pd.DataFrame, ses_final: pd.DataFrame) -> p
     return predictors
 
 
+def load_kerncijfers_corop() -> pd.DataFrame:
+    """
+    Load COROP-level regional key figures and return a clean panel.
+
+    Joins onto the main dataset via COROPcode + Jaar to provide
+    regional economic context not available at municipality level.
+    """
+    log.info("Loading COROP-level kerncijfers ...")
+    path = RAW / COROP_KERNCIJFERS_FILE
+    df   = pd.read_csv(path, sep=";", encoding="latin-1")
+
+    # Parse year from Perioden (e.g. '2015JJ00' -> 2015)
+    df["Jaar"] = df["Perioden"].str[:4].astype(int)
+
+    # COROPcode is stored in KoppelvariabeleRegioCode_321
+    df["COROPcode"] = df["KoppelvariabeleRegioCode_321"].str.strip()
+
+    # Select and rename relevant columns
+    cols_needed = ["COROPcode", "Jaar"] + list(COROP_COLS.keys())
+    df = df[cols_needed].copy()
+    df = df.rename(columns=COROP_COLS)
+
+    log.info(
+        "COROP kerncijfers loaded: %d rows | %d regions | %d-%d",
+        len(df), df["COROPcode"].nunique(), df["Jaar"].min(), df["Jaar"].max(),
+    )
+
+    # Log NaN coverage
+    for col in COROP_COLS.values():
+        pct = df[col].notna().mean() * 100
+        log.info("  %-35s  %.1f%% non-null", col, pct)
+
+    return df
+
+
 def load_leegstandsmonitor() -> pd.DataFrame:
     """Load, filter and enrich the vacancy monitor data."""
     log.info("Loading leegstandsmonitor ...")
@@ -588,8 +691,8 @@ def load_leegstandsmonitor() -> pd.DataFrame:
     ).astype("Int64")
     df = df.reset_index(drop=True)
 
-    # Drop geographic grouping columns
-    df = df.drop(columns=["Regio", "Gebiedstype", "Provinciecode", "Provincienaam", "COROPcode", "COROPnaam"])
+    # Drop geographic grouping columns but KEEP COROPcode for regional feature join
+    df = df.drop(columns=["Regio", "Gebiedstype", "Provinciecode", "Provincienaam", "COROPnaam"])
 
     # Keep count-based rows only
     df = df.loc[
@@ -689,16 +792,21 @@ def merge_labels_and_predictors() -> pd.DataFrame:
     return merged
 
 
-def prepare_modelling_dataset(merged: pd.DataFrame) -> pd.DataFrame:
+def prepare_modelling_dataset(merged: pd.DataFrame, corop_kern: pd.DataFrame) -> pd.DataFrame:
     """
     Clean the merged dataset and produce a model-ready file.
+
+    New in this version:
+        - Urbanisation level encoded as ordinal 1-5
+        - COROP-level economic features joined via COROPcode + Jaar
+        - COROP region one-hot encoded into 40 dummies
 
     Checks performed (all logged):
         1. NaN target rows        — dropped
         2. Zero target rows       — logged for awareness, kept
         3. NaN in feature columns — logged per column, rows dropped
         4. Duplicate rows         — dropped
-        5. Row counts per year and Gebruiksfunctie — logged as sanity check
+        5. Row counts per year and property type — logged as sanity check
     """
     log.info("Preparing model-ready dataset ...")
     df = merged.copy()
@@ -718,13 +826,51 @@ def prepare_modelling_dataset(merged: pd.DataFrame) -> pd.DataFrame:
         "SES_score",
         "Leegstand, jaar eerder ook al leeg (aantal)",
         "structurele_leegstand_pct",
+        # New municipality-level features
+        "Werkloosheid_159",
+        "Migratiesaldo_76",
+        "BedrijfsvestigingenTotaal_168",
+        "Bevolkingsdichtheid_57",
+        "AfstandTotTreinstation_238",
+        "GemiddeldeHuishoudensgrootte_89",
     ]
 
-    # Fill NaN with 0 where research was conducted (Onderzoekspopulatie > 0)
-    # This applies to: target, structural vacancy count, and structural vacancy pct
-    # Rationale: if buildings were researched but no vacancy reported, vacancy = 0
-    has_research = df["Onderzoekspopulatie"].notna() & (df["Onderzoekspopulatie"] > 0)
+    # ── A. Urbanisation level → ordinal encoding ─────────────────────────────
+    df["urbanisation_level_enc"] = df["Stedelijkheid"].map(URBANISATION_ORDER)
+    missing_urban = df["urbanisation_level_enc"].isna().sum()
+    if missing_urban > 0:
+        log.warning("  %d rows with unrecognised urbanisation level — set to NaN.", missing_urban)
+    log.info("  Urbanisation level encoded (1=Niet stedelijk ... 5=Zeer sterk stedelijk).")
 
+    # ── B. Join COROP-level features ─────────────────────────────────────────
+    # Ensure COROPcode is clean string for join
+    df["COROPcode"] = df["COROPcode"].astype(str).str.strip()
+    corop_kern["COROPcode"] = corop_kern["COROPcode"].astype(str).str.strip()
+    corop_kern["Jaar"]      = corop_kern["Jaar"].astype(int)
+    df["Jaar"]              = df["Jaar"].astype(int)
+
+    before_join = len(df)
+    df = df.merge(corop_kern, on=["COROPcode", "Jaar"], how="left")
+    log.info(
+        "  COROP features joined: %d rows before, %d after (delta=%d).",
+        before_join, len(df), len(df) - before_join,
+    )
+
+    # Check COROP join coverage
+    for col in COROP_COLS.values():
+        n_missing = df[col].isna().sum()
+        if n_missing > 0:
+            log.warning("  %d NaN rows in COROP feature '%s' after join.", n_missing, col)
+
+    # ── C. COROP one-hot encoding (40 regional dummies) ──────────────────────
+    df["COROPcode"] = df["COROPcode"].astype(str).str.strip()
+    corop_dummies   = pd.get_dummies(df["COROPcode"], prefix="corop", drop_first=True, dtype=float)
+    corop_dummy_cols = corop_dummies.columns.tolist()
+    df = pd.concat([df, corop_dummies], axis=1)
+    log.info("  COROP one-hot encoded: %d dummy columns added.", len(corop_dummy_cols))
+
+    # ── D. Zero-fill where research was conducted ─────────────────────────────
+    has_research = df["Onderzoekspopulatie"].notna() & (df["Onderzoekspopulatie"] > 0)
     cols_to_zero_fill = [
         raw_target,
         "Leegstand, jaar eerder ook al leeg (aantal)",
@@ -732,36 +878,52 @@ def prepare_modelling_dataset(merged: pd.DataFrame) -> pd.DataFrame:
     ]
     for col in cols_to_zero_fill:
         if col in df.columns:
-            mask = has_research & df[col].isna()
+            mask   = has_research & df[col].isna()
             filled = mask.sum()
             if filled > 0:
                 df.loc[mask, col] = 0.0
                 log.info("  Zero-filled %d NaN rows in '%s' where research_population > 0.", filled, col)
 
-    # 1. Drop rows where target is still NaN after zero-fill
+    # ── 1. Drop rows where target is still NaN after zero-fill ───────────────
     nan_target = df[raw_target].isna().sum()
     df = df.dropna(subset=[raw_target])
     log.info("  NaN target rows dropped: %d", nan_target)
 
-    # 2. Log zero-target rows (kept, but flagged)
+    # ── 2. Log zero-target rows (kept) ───────────────────────────────────────
     zero_target = (df[raw_target] == 0).sum()
     log.info("  Zero target rows (kept): %d", zero_target)
 
-    # 3. Check and drop rows with NaN in any predictor column
-    missing_per_col = df[raw_predictors].isna().sum()
+    # ── 3. Check and drop NaN predictor rows ─────────────────────────────────
+    all_raw_predictors = raw_predictors + ["urbanisation_level_enc"] + list(COROP_COLS.values())
+    missing_per_col = df[all_raw_predictors].isna().sum()
     missing_per_col = missing_per_col[missing_per_col > 0]
     if not missing_per_col.empty:
         log.warning("  NaN values found in predictor columns:\n%s", missing_per_col.to_string())
     before = len(df)
-    df = df.dropna(subset=raw_predictors)
+    df = df.dropna(subset=all_raw_predictors)
     log.info("  Rows dropped due to NaN predictors: %d", before - len(df))
 
-    # 4. Drop duplicate rows
+    # ── 4. Drop duplicate rows ───────────────────────────────────────────────
     before = len(df)
     df = df.drop_duplicates()
     log.info("  Duplicate rows dropped: %d", before - len(df))
 
-    # 5. Sanity check — row counts per year and property type
+    # ── 4b. Lagged vacancy rate ───────────────────────────────────────────────
+    # Sort by municipality, property type, and year so shift(1) looks back
+    # exactly one year within each municipality × property type group.
+    # 2015 rows get NaN (no prior year) and are dropped here.
+    df = df.sort_values(["Gemeentecode", "Gebruiksfunctie", "Jaar"]).copy()
+    df["vacancy_rate_lag1"] = (
+        df.groupby(["Gemeentecode", "Gebruiksfunctie"])[raw_target].shift(1)
+    )
+    before_lag = len(df)
+    df = df.dropna(subset=["vacancy_rate_lag1"])
+    log.info(
+        "  Lagged vacancy added. Dropped %d rows (2015, no prior year).",
+        before_lag - len(df),
+    )
+
+    # ── 5. Sanity check ──────────────────────────────────────────────────────
     counts_jaar = df.groupby("Jaar").size()
     counts_func = df.groupby("Gebruiksfunctie").size()
     log.info("  Rows per year:\n%s", counts_jaar.to_string())
@@ -772,14 +934,21 @@ def prepare_modelling_dataset(merged: pd.DataFrame) -> pd.DataFrame:
         start_rows, len(df), start_rows - len(df),
     )
 
-    # Rename all columns to clean English names
+    # ── Rename all columns to clean English names ────────────────────────────
     df = df.rename(columns=COLUMN_RENAME)
+
+    # Save updated PREDICTORS list including COROP dummies to a text file
+    # so model scripts can load it without hardcoding
+    all_predictors = PREDICTORS + corop_dummy_cols
+    pred_path = PROCESSED / "predictors_list.txt"
+    pred_path.write_text("\n".join(all_predictors))
+    log.info("  Full predictor list (%d features) saved -> %s", len(all_predictors), pred_path)
 
     out = PROCESSED / "model_ready.csv"
     out.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out, index=False)
     log.info("Model-ready dataset saved -> %s", out)
-    return df
+    return df, all_predictors
 
 
 def run_eda(df_raw: pd.DataFrame) -> None:
@@ -938,14 +1107,19 @@ def main() -> None:
     # Merge SES into predictors
     merge_ses_into_predictors(kern_panel, ses_final)
 
+    # 4b. COROP-level regional key figures
+    corop_kern = load_kerncijfers_corop()
+
     # 5. Leegstandsmonitor (labels)
     load_leegstandsmonitor()
 
     # 6. Merge labels + predictors
     merged = merge_labels_and_predictors()
 
-    # 7. Prepare model-ready dataset
-    model_df = prepare_modelling_dataset(merged)
+    # 7. Prepare model-ready dataset (now includes COROP features + urbanisation encoding)
+    model_df, all_predictors = prepare_modelling_dataset(merged, corop_kern)
+
+    log.info("Final predictor list (%d features):\n  %s", len(all_predictors), "\n  ".join(all_predictors))
 
     # 8. EDA
     run_eda(model_df)

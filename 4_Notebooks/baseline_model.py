@@ -45,19 +45,38 @@ PLOTS     = Path("../4_Plots/model")
 
 TARGET = "vacancy_rate_pct"
 
-PREDICTORS = [
-    "total_population",
-    "share_working_age",
-    "share_owner_occupied",
-    "share_social_rental",
-    "share_private_rental",
-    "avg_property_value",
-    "population_growth_per1000",
-    "grey_pressure_pct",
-    "ses_score",
-    "structural_vacancy_count",
-    "structural_vacancy_pct",
-]
+# Predictors are loaded dynamically from the file saved by pre_processing.py
+# This ensures baseline always uses the same features as the model comparison
+PREDICTORS_FILE = PROCESSED / "predictors_list.txt"
+
+def load_predictors(df: pd.DataFrame) -> list[str]:
+    """
+    Load predictor list from file saved by pre_processing.py.
+    Falls back to a hardcoded minimal list if the file doesn't exist.
+    Filters to only columns that exist in the loaded dataframe.
+    """
+    if PREDICTORS_FILE.exists():
+        predictors = PREDICTORS_FILE.read_text().strip().splitlines()
+        log.info("Loaded %d predictors from %s", len(predictors), PREDICTORS_FILE)
+    else:
+        log.warning(
+            "predictors_list.txt not found — falling back to hardcoded predictor list. "
+            "Run pre_processing.py first to generate the full predictor list."
+        )
+        predictors = [
+            "total_population", "share_working_age", "share_owner_occupied",
+            "share_social_rental", "share_private_rental", "avg_property_value",
+            "population_growth_per1000", "grey_pressure_pct", "ses_score",
+            "structural_vacancy_count", "structural_vacancy_pct",
+        ]
+
+    # Filter to columns that actually exist in the dataframe
+    missing = [p for p in predictors if p not in df.columns]
+    if missing:
+        log.warning("  %d predictors not found in dataset and will be skipped: %s", len(missing), missing)
+    available = [p for p in predictors if p in df.columns]
+    log.info("  Using %d predictors.", len(available))
+    return available
 
 # Time-based split: train on past years, test on most recent years
 TRAIN_YEARS = [2015, 2016, 2017, 2018, 2019, 2020, 2021]
@@ -124,17 +143,26 @@ def run_models(df: pd.DataFrame) -> pd.DataFrame:
     evaluate on the test set, and produce diagnostic plots.
     Returns a summary DataFrame with all metrics.
     """
-    results = []
+    results   = []
+    predictors = load_predictors(df)
 
     for func in PROPERTY_TYPES:
         log.info("── %s ──────────────────────────────────────", func)
 
         subset = df[df["property_type"] == func].copy()
+
+        if len(subset) == 0:
+            log.warning(
+                "── %s — NO ROWS FOUND. Available property_type values: %s",
+                func, df["property_type"].unique().tolist(),
+            )
+            continue
+
         train, test = split(subset)
 
-        X_train = train[PREDICTORS]
+        X_train = train[predictors]
         y_train = train[TARGET]
-        X_test  = test[PREDICTORS]
+        X_test  = test[predictors]
         y_test  = test[TARGET]
 
         log.info("  Train shape: %s  |  Test shape: %s", X_train.shape, X_test.shape)
