@@ -1,16 +1,3 @@
-"""
-Data Overview Script
-====================
-Covers:
-    1. SES (Socio-Economic Status) scores
-    2. Population density per municipality
-    3. Municipality harmonization (fusies & splits)
-    4. Regional key figures (regionale kerncijfers)
-    5. Leegstandsmonitor (vacancy monitor)
-    6. Merging labels and predictors
-    7. EDA (exploratory data analysis)
-
-"""
 
 from __future__ import annotations
 
