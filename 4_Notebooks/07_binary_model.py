@@ -96,54 +96,6 @@ def threshold_sweep(clf_name, y_prob, y_test_binary, y_test_all, X_test_all, reg
     return results
 
 
-def save_latex(all_results, auc_scores, path):
-    lines = []
-    lines.append(r"\begin{table}[H]")
-    lines.append(r"\centering")
-    lines.append(r"\caption{Two-stage model threshold sweep for Residential vacancy. "
-                 r"Stage 2 R\textsuperscript{2} evaluated on municipalities passed by Stage 1. "
-                 r"Baseline single-stage RF R\textsuperscript{2} = 0.526.}")
-    lines.append(r"\label{tab:binary_threshold}")
-    lines.append(r"\begin{tabular}{llccccr}")
-    lines.append(r"\toprule")
-    lines.append(r"\textbf{Classifier} & \textbf{Threshold} & \textbf{FP} & \textbf{FN} "
-                 r"& \textbf{N passed} & \textbf{Stage 2 R\textsuperscript{2}} "
-                 r"& \textbf{$\Delta$R\textsuperscript{2}} \\")
-    lines.append(r"\midrule")
-
-    # dict.fromkeys deduplicates while preserving insertion order
-    classifiers = list(dict.fromkeys(r["classifier"] for r in all_results))
-    for i, clf_name in enumerate(classifiers):
-        clf_rows = [r for r in all_results
-                    if r["classifier"] == clf_name and r["stage2_r2"] is not None]
-        auc     = auc_scores[clf_name]
-        best_r2 = max(r["stage2_r2"] for r in clf_rows)
-        first   = True
-        for row in clf_rows:
-            clf_label = f"{clf_name} (AUC={auc:.3f})" if first else ""
-            first = False
-            r2_str = f"{row['stage2_r2']:.3f}"
-            d_str  = f"{row['delta_r2']:+.3f}"
-            if row["stage2_r2"] == best_r2:
-                r2_str = r"\textbf{" + r2_str + "}"
-                d_str  = r"\textbf{" + d_str  + "}"
-            lines.append(
-                f"{clf_label} & {row['threshold']:.2f} & {row['FP']} & {row['FN']} "
-                f"& {row['n_passed']} & {r2_str} & {d_str} \\\\"
-            )
-        if i < len(classifiers) - 1:
-            lines.append(r"\midrule")
-
-    lines.append(r"\bottomrule")
-    lines.append(r"\end{tabular}")
-    lines.append(r"\end{table}")
-
-    tex = "\n".join(lines)
-    Path(path).write_text(tex)
-    log.info("LaTeX table saved -> %s", path)
-    return tex
-
-
 def main():
     df, all_preds = load_data()
     best_rf_params = load_best_params()
